@@ -15,6 +15,10 @@ import mysql.connector as DB
 from pprint import pprint
 
 
+
+import gevent
+from gevent import monkey; monkey.patch_all()
+
 def setup_logging(cfg_path='logging.yaml', level=logging.INFO, env_key='LOG_CFG'):
     """Setup the logging configuration"""
     path = os.getenv(env_key) or cfg_path
