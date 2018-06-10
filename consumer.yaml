@@ -1,0 +1,25 @@
+---
+mysql_info:
+    port: 3306
+    user: root
+    password: root
+    host: localhost
+    database: baidu_work
+
+log_info:
+    log_file: 'local_db_svc.log'
+
+kafka_info:
+  conn:
+      security.protocol: ssl
+      ssl.ca.location: ca.pem
+      ssl.key.location: client.key
+      ssl.certificate.location: client.pem
+      bootstrap.servers: kafka.bj.baidubce.com:9091
+      group.id: bff6ca7fc15347e19fbbe65a92551947_unibot_status_test
+
+  topics: 
+    - bff6ca7fc15347e19fbbe65a92551947__test_by_ywq
+
+  
+...

@@ -1,0 +1,11 @@
+---
+kafka_conn:
+    security.protocol: ssl
+    ssl.ca.location: ca.pem
+    ssl.key.location: client.key
+    ssl.certificate.location: client.pem
+    bootstrap.servers: kafka.bj.baidubce.com:9091
+
+kafka_topic: bff6ca7fc15347e19fbbe65a92551947__test_by_ywq
+
+...
