@@ -3,6 +3,7 @@
 """
     Example of high-level Kafka 0.10 balanced consumer
 """
+
 import os
 import sys
 import yaml
@@ -10,6 +11,7 @@ import collections
 import logging.config
 import confluent_kafka
 import mysql.connector as DB
+
 from pprint import pprint
 
 
@@ -138,7 +140,7 @@ class DBHandler(object):
 
         try:
             self.conn = DB.connect(**conf)
-            self.cursor = self.conn.cursor
+            self.cursor = self.conn.cursor()
             logger.info('DB params: ' + ';'.join(map(lambda k_v: '%s: %s' % k_v, conf.items())))
             logger.info('Connect DB successed!')
         except DB.Error as err:
@@ -165,7 +167,11 @@ class DBHandler(object):
         #     logger.warn(ret)
 
     def exe_many(self, sql, params_seq):
-        self.cursor.execute_many(sql, params_seq)
+        self.cursor.executemany(sql, params_seq)
+
+    def exe(self, sql):
+        print 'got sql %s' % sql
+        # self.cursor.execute(sql)
         
     def close(self):
         """
@@ -180,9 +186,17 @@ class DBHandler(object):
 
 
 class SqlBuilder(object):
+    '''
+    insert into table_name (col1, col2, col3) values (val1, val2, val3)
+    '''
 
-    query = 'insert into t_unibot_status values {instance_id}, {bot_id}, \
-                {bot_model_version!r}, {bot_status!r}, {create_time}, {description}'
+    params = ('instance_id', 'bot_id', 'bot_model_version', 'bot_status', 'create_time', 'description')
+
+    QueryParams = collections.namedtuple('QueryParams', params)
+
+    query = ('insert into t_unibot_status '
+             '(instance_id, bot_id, bot_model_version, bot_status, create_time, description) bvalues '
+             '{instance_id}, {bot_id}, {bot_model_version}, {bot_status}, {create_time}, {description}')
 
     def __init__(self):
         pass
@@ -242,31 +256,70 @@ class Consumer(object):
     def __init__(self, conf):
         self.conf = conf
         self.init_kafka()
+        self.init_sql_bulider()
         self.init_mysql_executer()
 
 
     def init_kafka(self):
-        conn_info = self.conf.conn
+        conn_info = self.conf.kafka_info.conn
         self.c = confluent_kafka.Consumer(**conn_info)
 
-        topics = self.conf.topics
+        topics = self.conf.kafka_info.topics
+        print topics
         self.c.subscribe(topics)
 
-    def init_mysql_executer(self):
-        pass
+    def init_sql_bulider(self):
+        self.sqlbulider = SqlBuilder()
 
-    def consume(self):
+    def init_mysql_executer(self):
+        self.db = DBHandler(self.conf.mysql_info)
+
+    def self_consume(self, _id):
         while True:
+            print '%s.0' % _id
             msg = self.c.poll(timeout=1.0)
             if msg is None:
                 continue
-            elif msg.error():
-                yield msg
-            else:
-                self.handler.exe(msg)
+            if msg.error():
+                if msg.error().code() == confluent_kafka.KafkaError._PARTITION_EOF:
+                    logger.info('partion(%d) => toppic(%s) reached end at offset %d', msg.partition(), msg.topic(), msg.offset())
+                elif msg.error():
+                    logger.exception('Kafka Error: %s', msg.error())
+                continue
+            print '%s.1' % _id
+            data = msg.value()
+            logger.info(data)
+            query = data
+            print 'data: ', data
+            # query = self.sqlbulider.build(data)
+            print '%s.2' %_id
+            if query is not None:
+                self.db.exe(query)
+                print 'exe sql'
+            print '%s.3' % _id
+
+    def consume(self):
+        while True:
+            print '1'
+            msg = self.c.poll(timeout=1.0)
+            if msg is None:
+                continue
+            if msg.error():
+                if msg.error().code() == confluent_kafka.KafkaError._PARTITION_EOF:
+                    logger.info('partion(%d) => toppic(%s) reached end at offset %d', msg.partition(), msg.topic(), msg.offset())
+                elif msg.error():
+                    logger.exception('Kafka Error: %s', msg.error())
+                continue
+            logger.info(msg.value())
+            print '1.1'
+            print '1.2'
+            # self.handler.exe(msg)
 
     def consume_many():
         pass
+
+    def close(self):
+        self.c.close()
             
     def set_mysql_handler(self, handler):
         self.mysql_handler = handler
@@ -301,18 +354,59 @@ class Consumer(object):
         self.c.close()
         
 
-def SqlConsumer(conf_path):
-    conf = ConfigHandler(conf_path)
-    consumer = Consumer(conf.kafka_info)
-    db = DBHandelr(conf.mysql_info)
+def SqlConsumer(cfg):
+    # config info
+
+    # fetch data from kafka
+    consumer = Consumer(cfg.kafka_info)
+    # init mysql
+    db = DBHandler(cfg.mysql_info)
+
+    sqlbulider = SqlBuilder()
 
     def consume_and_exc():
-        pass
+        try:
+            while True:
+                # list of params_seq
+                # data = consumer.consume_many()
+                # requerys = map(sqlbulider.build, data)
+                # db.exe_many(requerys)
+                print '0'
+                data = consumer.consume()
+                print '2'
+                requery = sqlbulider.build(data)
+                print '3'
+                logger.info('Build MySQL requery: %s', requery)
+                # if requery is not None:
+                #     db.exe(requery)
+        except:
+            raise
+        finally:
+            db.close()
+            consumer.close()
 
     return consume_and_exc
 
-def test_confighandler():
 
+def run_0(cfg_path):
+    cfg = ConfigHandler(cfg_path)
+    consume_and_exc = SqlConsumer(cfg)
+
+    g = gevent.spawn(consume_and_exc)
+    g.join()
+
+
+def run_1(cfg_path):
+    cfg = ConfigHandler(cfg_path)
+    consumer1 = Consumer(cfg)
+    consumer2 = Consumer(cfg)
+    g_1 = gevent.spawn(consumer1.self_consume, 1)
+    g_2 = gevent.spawn(consumer2.self_consume, 2)
+    gevent.joinall([g_1, g_2])
+    # gevent.joinall(map(gevent.spawn, [consumer1.self_consume, consumer2.self_consume]))
+
+
+def test_confighandler():
 
     cfg_consumer = 'consumer.yaml'
     conf = ConfigHandler(cfg_consumer)
@@ -327,11 +421,17 @@ def test_logging():
     logger.info('Hello INFO!')
 
 if __name__ == '__main__':
+
+    cfg_path = 'consumer.yaml'
     # test()
     # c = Consumer('consumer.yaml')
     # c.test()
     # test_logging()
-    test_confighandler()
+    # test_confighandler()
+    # run_0(cfg_path)
+    run_1(cfg_path)
+
+
 
 
 
