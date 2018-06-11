@@ -1,25 +1,20 @@
-﻿#!/usr/bin/python
-# -*- coding: utf-8 -*-
-"""
-    Example of high-level Kafka 0.10 balanced consumer
-"""
+﻿#!/usr/bin/env python
+# -*- coding:utf-8 -*-
+
 
 import os
 import sys
 import yaml
+import copy
+import threading
 import collections
 import logging.config
 import confluent_kafka
-import simplejson as josn
+import simplejson as json
 import mysql.connector as DB
+from datetime import datetime
+from functools import partial
 
-
-
-
-# import gevent
-# from gevent import monkey; monkey.patch_all()
-
-import threading
 
 def setup_logging(cfg_path='logging.yaml', level=logging.INFO, env_key='LOG_CFG'):
     """Setup the logging configuration"""
@@ -96,47 +91,27 @@ class DBHandler(object):
             self.conn = DB.connect(**conf)
             self.cursor = self.conn.cursor()
             logger.info('DB params: ' + ';'.join(map(lambda k_v: '%s: %s' % k_v, conf.items())))
-            logger.info('Connect DB successed!')
+            logger.info('DB connect successed!')
         except DB.Error as err:
             logger.error('Connect DB Error: ' + err)
     
-    # def exe(self, sql):
-        # """
-        # sql = 'insert into table_name values (%s, %s, ...)' %  xxx, xxx, ...
-        # """
-        # # sql = 'desc t_unibot_status;'
-        # try:
-        #     self.cursor.execute(sql)
-        #     self.conn.commit()
-        # except:
-        #     self.conn.rollback()
-        
-        # ret = ""
-        # try:
-        #     ret = self.cursor.fetchall()
-        #     logger.info('Fetch db result successed: ')
-        #     logger.info(ret)
-        # except:
-        #     logger.warn('Fetch db result failed: ')
-        #     logger.warn(ret)
-
     def exe_many(self, sql, params_seq):
         self.cursor.executemany(sql, params_seq)
 
     def exe(self, sql):
-        print 'got sql %s' % sql
-        # self.cursor.execute(sql)
+        try:
+            self.cursor.execute(sql)
+        except Exception as e:
+            logger.exception('DB Exception: %s', e.msg)
+
         
     def close(self):
-        """
-        close db
-        """
         try:
             self.cursor.close()
             self.conn.close()
-            logger.info("Close DB successed !")
+            logger.info("DB close successed !")
         except:
-            logger.warn('Close DB failed !')
+            logger.warn('DB close failed !')
 
 
 class SqlBuilder(object):
@@ -149,13 +124,14 @@ class SqlBuilder(object):
     QueryParams = collections.namedtuple('QueryParams', params)
 
     query = ('insert into t_unibot_status '
-             '(instance_id, bot_id, bot_model_version, bot_status, create_time, description) bvalues '
-             '{instance_id}, {bot_id}, {bot_model_version}, {bot_status}, {create_time}, {description}')
+             '(instance_id, bot_id, bot_model_version, bot_status, create_time, description) values '
+             '({instance_id}, {bot_id}, {bot_model_version}, {bot_status!r}, {create_time!r}, {description!r})')
 
     check_failed_journal = 'Params illegal, %s not exist!, params: \n==> %s'
 
     def __init__(self):
-        pass
+        # self.ime_format = '%Y-%m-%d %H:%M:%S.%f'
+        self.time_format = '%Y-%m-%d %H:%M:%S'
 
 
     def build(self, params):
@@ -165,10 +141,11 @@ class SqlBuilder(object):
         exe_time timestamp(6) not null default CURRENT_TIMESTAMP(6) on update CURRENT_TIMESTAMP(6), description varchar(100)); 
         
         t_unibot_status
-        id, instance_id, bot_id, bot_model_version, bot_status, create_time, update_time, description
+        (id, )instance_id, bot_id, bot_model_version, bot_status, create_time, update_time, description
         """
         
         checked_ok, params = self.check_and_fix(params)
+        logger.debug('pass checked, %s', str(checked_ok))
         if not checked_ok:
             return None
 
@@ -177,42 +154,51 @@ class SqlBuilder(object):
         
         return sql
 
+    def dumps(self, _dict):
+        def _converter(o):
+            if isinstance(o, datetime):
+                return o.strftime(self.time_format)
+        return partial(json.dumps, default=_converter)(_dict)
+
     def check_and_fix(self, params):
         """
         {"bot_status":"loading","instance_id":1137}
         {"bot_id":2148,"bot_model_version":3,"bot_status":"running","instance_id":1137}
         """
 
-        _params = self.QueryParams._make(params.split(','))
+        _params = self.QueryParams._make(params.split(','))._asdict()
         self.ori_params = copy.deepcopy(_params)
 
-        logger.debug('Before checking and fixing params: \n==> %s', json.dumps(_params))
+        logger.debug('Before checking and fixing params: \n==> %s', self.dumps(_params))
 
-        if 'instance_id' not in _params:
+        if not _params.get('instance_id'):
             self.check_failed('instance_id')
             return False, self.ori_params
 
-        if 'bot_status' not in _params:
+        if not _params.get('bot_status'):
             self.check_failed('bot_status')
             return False, self.ori_params
 
-        if 'bot_id' not in _params:
+        if not _params.get('bot_id'):
             _params['bot_id'] = 0
-        if 'bot_model_version' not in _params:
+
+        if not _params.get('bot_model_version'):
             _params['bot_model_version'] = 3
-        time_format = '%Y-%m-%d %H:%M:%S.%f'
-        if 'create_time' not in _params:
-            _params['create_time'] = datetime.now().strftime(time_format)
-        if 'description' not in _params:
+        
+        if _params.get('create_time'):
+            _params['create_time'] = datetime.now().strftime(self.time_format)
+        else:
+            _params['create_time'] = datetime.strptime(_params['create_time'], self.time_format)
+
+        if not _params.get('description'):
             _params['description'] = 'no need desc!'
 
-        logger.debug('After fixing params: \n==> %s', json.dumps(_params))
-
+        logger.debug('After fixing params: \n==> %s', self.dumps(_params))
         return True, _params
 
     def check_failed(self, key):
         journal = 'Params illegal, %s not exist!, params: \n==> %s'
-        logger.warn(journal, key), json.dumps(self.ori_params)
+        logger.warn(journal, key, self.dumps(self.ori_params))
 
 
 class Consumer(object):
@@ -236,22 +222,23 @@ class Consumer(object):
         try:
             while self.continue_run:
                 logger.debug('(%s)consumer waiting for msg', _id)
-                msg = self.c.poll(timeout=1.0)
-                if msg is None:
-                    continue
-                if msg.error():
-                    if msg.error().code() == confluent_kafka.KafkaError._PARTITION_EOF:
-                        logger.info('toppic(%s) [partition(%d)] Reached end at offset %d', msg.topic(), msg.partition(), msg.offset())
-                    else:
-                        logger.exception('Kafka Error: %s', msg.error())
-                    continue
-                data = msg.value()
-                logger.info(data)
-                query = data
-                # query = self.sqlbulider.build(data)
-                if query is not None:
-                    self.db.exe(query)
-                    logger.debug('%s exe sql', _id)
+                msgs = self.c.consume(num_messages=100, timeout=3.0)
+                logger.debug('(%s)consumer got %s msgs', _id, len(msgs))
+                for msg in msgs:
+                    if msg is None:
+                        continue
+                    if msg.error():
+                        if msg.error().code() == confluent_kafka.KafkaError._PARTITION_EOF:
+                            logger.info('toppic(%s) [partition(%d)] Reached end at offset %d', 
+                                        msg.topic(), msg.partition(), msg.offset())
+                        else:
+                            logger.exception('Kafka Error: %s', msg.error())
+                        continue
+                    value = msg.value()
+                    query = self.sqlbulider.build(value)
+                    if query is not None:
+                        self.db.exe(query)
+                        logger.debug('%s exe sql', _id)
         except:
             raise
         finally:
@@ -269,13 +256,12 @@ class Consumer(object):
         self.db.close()   
 
     def test(self):
-        numOfRecords = 2
         try:
-            while numOfRecords > 0 or 1:
+            while True:
                 logger.debug('start fetching msgs')
-                msgs = self.c.consume(num_messages=3, timeout=5.0)
+                msgs = self.c.consume(num_messages=100, timeout=3.0)
+                logger.debug('got %s msg', len(msgs))
                 for msg in msgs:
-                    logger.debug('got %s msg', len(msgs))
                     if msg is None:
                         logger.debug('msg is none')
                         continue
@@ -290,10 +276,8 @@ class Consumer(object):
                     else:
                         logger.debug('type: %s', type(msg.value()))
                         logger.debug('value: %s' , msg.value())
-                        # logger.debug(msg.__dict__)
                         sys.stderr.write('parition: %d, offset: %d, message: %s\n' %
                                             (msg.partition(), msg.offset(), msg.value()))
-                numOfRecords = numOfRecords - 1
         except KeyboardInterrupt:
             sys.stderr.write('Aborted by user\n')
 
@@ -301,87 +285,25 @@ class Consumer(object):
         self.c.close()
         
 
-def SqlConsumer(cfg):
-    # config info
-
-    # fetch data from kafka
-    consumer = Consumer(cfg.kafka_info)
-    # init mysql
-    db = DBHandler(cfg.mysql_info)
-
-    sqlbulider = SqlBuilder()
-
-    def consume_and_exc():
-        try:
-            while True:
-                # list of params_seq
-                # data = consumer.consume_many()
-                # requerys = map(sqlbulider.build, data)
-                # db.exe_many(requerys)
-                print '0'
-                data = consumer.consume()
-                print '2'
-                requery = sqlbulider.build(data)
-                print '3'
-                logger.info('Build MySQL requery: %s', requery)
-                # if requery is not None:
-                #     db.exe(requery)
-        except:
-            raise
-        finally:
-            db.close()
-            consumer.close()
-
-    return consume_and_exc
-
-
-def gevent_run(cfg_path):
-    cfg = ConfigHandler(cfg_path)
-    consume_and_exc = SqlConsumer(cfg)
-
-    g = gevent.spawn(consume_and_exc)
-    g.join()
-
-
 def run(cfg_path):
     cfg = ConfigHandler(cfg_path)
     consumer_num = cfg.kafka_info.partition_num
     consumers = [ Consumer(cfg) for i in range(consumer_num) ]
 
-    
-    # consumer1 = Consumer(cfg)
-    # consumer2 = Consumer(cfg)
-    # g_1 = gevent.spawn(consumer1.run, 1)
-    # g_2 = gevent.spawn(consumer2.run, 2)
-    # gevent.joinall([g_1, g_2])
-    # gevent.joinall(map(gevent.spawn, [consumer1.run, consumer2.run]))
     try:
         thread_list = []
         for i, c in enumerate(consumers, 1):
-            # thread_list.append(threading.Thread(target=c.run, args=(i, )))
-            t = threading.Thread(target=c.run, args=(i, ))
-            t.daemon = True
-            thread_list.append(t)
+            thread_list.append(threading.Thread(target=c.run, args=(i, )))
 
         map(lambda t: t.start(), thread_list)
         map(lambda t: t.join(), thread_list)
         logger.info('never reach the end of join')
+        # add a new thread to listen kill signal
     except KeyboardInterrupt:
         logger.info('this will never happen!')
         map(lambda c: c.terminate(), consumers)
         raise
 
-
-def test_confighandler():
-
-    cfg_consumer = 'consumer.yaml'
-    conf = ConfigHandler(cfg_consumer)
-    db = DBHandler(conf.mysql_info)
-    # test if conf is a iterator
-    for k in conf:
-        print 'k :\n %s' % k
-    print type(conf['mysql_info']), conf['mysql_info']
-    print type(conf.mysql_info), conf.mysql_info
 
 def test_logging():
     setup_logging()
@@ -391,16 +313,16 @@ def test_logging():
 if __name__ == '__main__':
 
     cfg_path = 'consumer.yaml'
+
     cfg = ConfigHandler(cfg_path)
     c = Consumer(cfg)
-    c.test()
-    # test_logging()
-    # test_confighandler()
-    # gevent_run(cfg_path)
+    c.run(1)
+
     # run(cfg_path)
 
 
+'''
+todos:
 
-
-
-
+-1 parse datetime use json
+'''

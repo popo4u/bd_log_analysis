@@ -6,8 +6,10 @@
 import os
 import sys
 import yaml
+import copy
 import argparse
 import logging
+import simplejson as json
 from datetime import datetime
 import confluent_kafka
 
@@ -92,7 +94,7 @@ class SqlBuilder(object):
         exe_time timestamp(6) not null default CURRENT_TIMESTAMP(6) on update CURRENT_TIMESTAMP(6), description varchar(100)); 
         
         t_unibot_status
-        id, instance_id, bot_id, bot_model_version, bot_status, create_time, update_time, description
+        (id, )instance_id, bot_id, bot_model_version, bot_status, create_time, update_time, description
         """
         
         checked_ok, params = self.check_and_fix(params)
@@ -126,7 +128,7 @@ class SqlBuilder(object):
             params['bot_model_version'] = 3
         time_format = '%Y-%m-%d %H:%M:%S.%f'
         if 'create_time' not in params:
-            params['create_time'] = datetime.now().strftime(time_format)
+            params['create_time'] = datetime.now().strptime(time_format)
         if 'description' not in params:
             params['description'] = 'no need desc!'
         logger.logger.info('After fixing: ')
@@ -142,7 +144,8 @@ def SendSql():
 
     def bulid_and_send(params):
         # dict::params
-        sql = sql_builder.build(params)
+        # sql = sql_builder.build(params)
+        sql = params
         if sql is not None:
             logger.logger.info('Will send sql: %s' % sql)
             sql_sender.send(sql)
@@ -161,5 +164,10 @@ if __name__ == '__main__':
         {"bot_status":"loading","instance_id":1137},
         {"bot_id":2148,"bot_model_version":3,"bot_status":"running","instance_id":1137}
     ]
-
-    map(sendsql, test_cases)
+    str_test_cases = [
+        "1,0,3,running,2018-06-11 12:32:37,",
+        "1,0,3,running,2018-06-11 12:32:38,"
+    ]
+    for i in range(1):
+        # 200 
+        map(sendsql, str_test_cases)

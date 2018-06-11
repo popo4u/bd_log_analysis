@@ -5,9 +5,10 @@ mysql_info:
     password: root
     host: localhost
     database: baidu_work
+    autocommit: True
 
 log_info:
-    log_file: 'local_db_svc.log'
+    log_file: local_db_svc.log
 
 kafka_info:
   conn:
