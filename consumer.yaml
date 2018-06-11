@@ -21,5 +21,5 @@ kafka_info:
   topics: 
     - bff6ca7fc15347e19fbbe65a92551947__test_by_ywq
 
-  
+  partition_num: 2  
 ...

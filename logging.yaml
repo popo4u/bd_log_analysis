@@ -38,7 +38,7 @@ handlers:
 loggers:
     dev:
         level: DEBUG
-        handlers: [console]
+        handlers: [console, info_file_handler]
         propagate: no
 
     unibot_status:
