@@ -129,12 +129,14 @@ class DBHandler(object):
     def exe_many(self, sql, params_seq):
         try:
             self.cursor.executemany(sql, params_seq)
+            logger.info('DB execute %s sql SUCCESSFUL', len(params_seq))
         except Exception as e:
             logger.exception('DB exception:')
         
-    def exe(self, sql):
+    def exe(self, sql, params):
         try:
-            self.cursor.execute(sql)
+            self.cursor.execute(sql, params)
+            logger.info('DB execute 1 sql SUCCESSFUL')
         except Exception as e:
             logger.exception('DB exception:')
 
@@ -151,11 +153,11 @@ class SqlBuilder(object):
     '''
     insert into table_name (col1, col2, col3) values (val1, val2, val3)
     '''
-
     query = ("insert into t_unibot_status "
-             "(instance_id, bot_id, bot_model_version, bot_code_version, bot_status, vm_ip, create_time, update_time, description) values "
-             "({instance_id}, {bot_id}, {bot_model_version}, {bot_code_version}, '{bot_status}', '{vm_ip}', '{create_time}', '{update_time}', '{description}')")
-
+             "(instance_id, bot_id, bot_model_version, "
+             "bot_code_version, bot_status, vm_ip, create_time, update_time, description) "
+             "values (%(instance_id)s, %(bot_id)s, %(bot_model_version)s, %(bot_code_version)s, "
+             "%(bot_status)s, %(vm_ip)s, %(create_time)s, %(update_time)s, %(description)s)")
 
     def __init__(self, params_info):
         self.params_info = params_info
@@ -199,19 +201,16 @@ class SqlBuilder(object):
         
         params = self.check_and_fix(params_str)
         if not params:
-            return None
+            return None, None
 
-        sql = self.query.format(**params)
-        logger.info('Build sql: %s' % sql)
-        
-        return sql
+        return self.query, params
 
     def build_many(self, params_str_seq):
         params_seq = []
         for params_str in params_str_seq:
-            param = self.build_params(params_str)
-            if param is None:
-                continue 
+            if not params_str: continue
+            param = self.check_and_fix(params_str)
+            if param is None: continue 
             params_seq.append(param)
         return self.query, params_seq
 
@@ -220,7 +219,7 @@ class Consumer(object):
     def __init__(self, conf):
         self.conf = conf
         self.init_kafka()
-        self.sqlbulider = SqlBuilder(cfg.query_params)
+        self.sqlbulider = SqlBuilder(conf.query_params)
         self.db = DBHandler(conf.mysql_info)
 
         self.continue_run = True
@@ -232,8 +231,10 @@ class Consumer(object):
         topics = self.conf.kafka_info.topics
         self.c.subscribe(topics)
 
+    def extract_info(self, msg):
+        return msg.value().split('\t')[-1]
 
-    def run(self, _id):
+    def consume(self, _id):
         while self.continue_run:
             try:
                 logger.debug('(%s)consumer waiting for msg', _id)
@@ -249,11 +250,33 @@ class Consumer(object):
                         else:
                             logger.exception('Kafka Error: %s', msg.error())
                         continue
-                    value = msg.value()
-                    query = self.sqlbulider.build(value)
-                    if query is not None:
-                        self.db.exe(query)
-                        logger.debug('%s exe sql', _id)
+                    query, params = self.sqlbulider.build(self.extract_info(msg))
+                    if params is not None:
+                        self.db.exe(query, params)
+            except Exception as e:
+                logger.exception('(%s)consumer Got Exception:', _id)
+
+    def multi_consume(self, _id):
+        while self.continue_run:
+            try:
+                logger.debug('(%s)consumer waiting for msg', _id)
+                msgs = self.c.consume(num_messages=100, timeout=3.0)
+                if len(msgs) == 0: continue
+                logger.debug('(%s)consumer got %s msgs', _id, len(msgs))
+                params_str_seq = []
+                for msg in msgs:
+                    if msg is None:
+                        continue
+                    if msg.error():
+                        if msg.error().code() == confluent_kafka.KafkaError._PARTITION_EOF:
+                            logger.info('toppic(%s) [partition(%d)] Reached end at offset %d', 
+                                        msg.topic(), msg.partition(), msg.offset())
+                        else:
+                            logger.exception('Kafka Error: %s', msg.error())
+                        continue
+                    params_str_seq.append(self.extract_info(msg))
+                sql, querys = self.sqlbulider.build_many(params_str_seq)
+                self.db.exe_many(sql, querys)
             except Exception as e:
                 logger.exception('(%s)consumer Got Exception:', _id)
 
@@ -301,7 +324,7 @@ def run(cfg_path):
     try:
         thread_list = []
         for i, c in enumerate(consumers, 1):
-            thread_list.append(threading.Thread(target=c.run, args=(i, )))
+            thread_list.append(threading.Thread(target=c.multi_consume, args=(i, )))
 
         map(lambda t: t.start(), thread_list)
         map(lambda t: t.join(), thread_list)
@@ -316,17 +339,8 @@ if __name__ == '__main__':
 
     cfg_path = 'consumer.yaml'
 
-    cfg = ConfigHandler(cfg_path)
-    c = Consumer(cfg)
+    # cfg = ConfigHandler(cfg_path)
+    # c = Consumer(cfg)
+    # c.multi_consume(1)
 
-    c.run(1)
-
-    # run(cfg_path)
-
-
-'''
-todos:
--1 parse json_str to dict (datetime)
--2 test mysql.connector executemany met
--3 check_and_fix params by a better way
-'''
+    run(cfg_path)
