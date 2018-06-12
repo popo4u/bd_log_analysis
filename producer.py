@@ -6,12 +6,42 @@
 import os
 import sys
 import yaml
+import json
 import copy
 import argparse
 import logging
-import simplejson as json
 from datetime import datetime
+from functools import partial
 import confluent_kafka
+
+class SpecJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return dict(val=obj.isoformat(), _spec_type='datetime')
+        elif isinstance(obj, decimal.Decimal):
+            return dict(val=str(obj), _spec_type='decimal')
+        else:
+            return super(SpecJSONEncoder, self).default(obj)
+
+
+def object_hook(obj):
+    CONVERTERS = {
+        'datetime': dateutil.parser.parse,
+        'decimal': decimal.Decimal,
+    }
+
+    _spec_type = obj.get('_spec_type')
+    if not _spec_type:
+        return obj
+    if _spec_type in CONVERTERS:
+        return CONVERTERS[_spec_type](obj['val'])
+    else:
+        raise Exception('Json load Error: Unknown {}'.format(_spec_type))
+
+# parse datetime by json
+json.dumps = partial(json.dumps, cls=SpecJSONEncoder)
+json.loads = partial(json.loads, object_hook=object_hook)
+
 
 # TOFIX
 class Logger(object):
@@ -145,7 +175,7 @@ def SendSql():
     def bulid_and_send(params):
         # dict::params
         # sql = sql_builder.build(params)
-        sql = params
+        sql = json.dumps(params)
         if sql is not None:
             logger.logger.info('Will send sql: %s' % sql)
             sql_sender.send(sql)
@@ -161,8 +191,28 @@ if __name__ == '__main__':
 
 
     test_cases = [
-        {"bot_status":"loading","instance_id":1137},
-        {"bot_id":2148,"bot_model_version":3,"bot_status":"running","instance_id":1137}
+        {
+            "bot_status":"loading",
+            "instance_id":1137, 
+            "bot_id":2123, 
+            'create_time': datetime.now(),
+            'bot_code_version': 3,
+            'bot_model_version': 1,
+            'vm_ip': '127.0.0.1',
+            'description': 'fake data',
+            'update_time': ''
+        },
+        {
+            "bot_status":"running",
+            "instance_id":1137, 
+            "bot_id": 2, 
+            'create_time': datetime.now(),
+            'bot_code_version': 3,
+            'bot_model_version': 1,
+            'vm_ip': '127.0.0.1',
+            'desc': 'fake data',
+            'update_time': ''
+        },
     ]
     str_test_cases = [
         "1,0,3,running,2018-06-11 12:32:37,",
@@ -170,4 +220,4 @@ if __name__ == '__main__':
     ]
     for i in range(1):
         # 200 
-        map(sendsql, str_test_cases)
+        map(sendsql, test_cases)

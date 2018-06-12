@@ -6,11 +6,13 @@ import os
 import sys
 import yaml
 import copy
+import json
+import decimal
 import threading
 import collections
 import logging.config
+import dateutil.parser
 import confluent_kafka
-import simplejson as json
 import mysql.connector as DB
 from datetime import datetime
 from functools import partial
@@ -29,6 +31,34 @@ def setup_logging(cfg_path='logging.yaml', level=logging.INFO, env_key='LOG_CFG'
 setup_logging()
 logger = logging.getLogger('dev')
 
+
+class SpecJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return dict(val=obj.isoformat(), _spec_type='datetime')
+        elif isinstance(obj, decimal.Decimal):
+            return dict(val=str(obj), _spec_type='decimal')
+        else:
+            return super(SpecJSONEncoder, self).default(obj)
+
+
+def object_hook(obj):
+    CONVERTERS = {
+        'datetime': dateutil.parser.parse,
+        'decimal': decimal.Decimal,
+    }
+
+    _spec_type = obj.get('_spec_type')
+    if not _spec_type:
+        return obj
+    if _spec_type in CONVERTERS:
+        return CONVERTERS[_spec_type](obj['val'])
+    else:
+        raise Exception('Json load Error: Unknown {}'.format(_spec_type))
+
+# parse datetime by json
+json.dumps = partial(json.dumps, cls=SpecJSONEncoder)
+json.loads = partial(json.loads, object_hook=object_hook)
 
 class ObjectDict(dict):
     def __inti__(self, *args, **kwargs):
@@ -96,15 +126,17 @@ class DBHandler(object):
             logger.error('Connect DB Error: ' + err)
     
     def exe_many(self, sql, params_seq):
-        self.cursor.executemany(sql, params_seq)
-
+        try:
+            self.cursor.executemany(sql, params_seq)
+        except Exception as e:
+            logger.exception('DB exception:')
+        
     def exe(self, sql):
         try:
             self.cursor.execute(sql)
         except Exception as e:
-            logger.exception('DB Exception: %s', e.msg)
+            logger.exception('DB exception:')
 
-        
     def close(self):
         try:
             self.cursor.close()
@@ -119,20 +151,19 @@ class SqlBuilder(object):
     insert into table_name (col1, col2, col3) values (val1, val2, val3)
     '''
 
-    params = ('instance_id', 'bot_id', 'bot_model_version', 'bot_status', 'create_time', 'description')
+    params = ('instance_id', 'bot_id', 'bot_model_version', 
+              'bot_code_version', 'bot_status', 'vm_ip', 'create_time', 'update_time', 'desc')
 
     QueryParams = collections.namedtuple('QueryParams', params)
 
-    query = ('insert into t_unibot_status '
-             '(instance_id, bot_id, bot_model_version, bot_status, create_time, description) values '
-             '({instance_id}, {bot_id}, {bot_model_version}, {bot_status!r}, {create_time!r}, {description!r})')
+    query = ("insert into t_unibot_status "
+             "(instance_id, bot_id, bot_model_version, bot_code_version, bot_status, vm_ip, create_time, update_time, description) values "
+             "({instance_id}, {bot_id}, {bot_model_version}, {bot_code_version}, '{bot_status}', '{vm_ip}', '{create_time}', '{update_time}', '{description}')")
 
-    check_failed_journal = 'Params illegal, %s not exist!, params: \n==> %s'
 
-    def __init__(self):
-        # self.ime_format = '%Y-%m-%d %H:%M:%S.%f'
-        self.time_format = '%Y-%m-%d %H:%M:%S'
-
+    def __init__(self, params_info):
+        self.params_info = params_info
+        self.ime_format = '%Y-%m-%d %H:%M:%S.%f'
 
     def build(self, params):
         """
@@ -162,11 +193,12 @@ class SqlBuilder(object):
 
     def check_and_fix(self, params):
         """
+        TODO: use a better way!
         {"bot_status":"loading","instance_id":1137}
         {"bot_id":2148,"bot_model_version":3,"bot_status":"running","instance_id":1137}
         """
-
-        _params = self.QueryParams._make(params.split(','))._asdict()
+        _params = json.dumps
+        # _params = self.QueryParams._make(params.split(','))._asdict()
         self.ori_params = copy.deepcopy(_params)
 
         logger.debug('Before checking and fixing params: \n==> %s', self.dumps(_params))
@@ -184,28 +216,78 @@ class SqlBuilder(object):
 
         if not _params.get('bot_model_version'):
             _params['bot_model_version'] = 3
+
+        if not _params.get('bot_code_version'):
+            _params['bot_code_version'] = 3
         
-        if _params.get('create_time'):
+        if not _params.get('create_time'):
             _params['create_time'] = datetime.now().strftime(self.time_format)
         else:
             _params['create_time'] = datetime.strptime(_params['create_time'], self.time_format)
 
-        if not _params.get('description'):
-            _params['description'] = 'no need desc!'
+        if not _params.get('update_time'):
+            _params['update_time'] = datetime.now().strftime(self.time_format)
+        else:
+            _params['update_time'] = datetime.strptime(_params['update_time'], self.time_format)
+
+        if not _params.get('vm_ip'):
+            _params['vm_ip'] = ''
+
+        if not _params.get('desc'):
+            _params['desc'] = 'no need desc!'
 
         logger.debug('After fixing params: \n==> %s', self.dumps(_params))
         return True, _params
 
-    def check_failed(self, key):
-        journal = 'Params illegal, %s not exist!, params: \n==> %s'
-        logger.warn(journal, key, self.dumps(self.ori_params))
+    def check_and_fix_params(self, params_str):
+        logger.debug('Before checking and fixing params: \n==> %s', params_str)
 
+        params = json.loads(params_str)
+        for param, info in self.params_info.items():
+            logger.debug('prams: %s, info: %s', param, info)
+            if not params.get(param) and info.get('required'):
+                logger.warn('Params illegal, %s is required!', param)
+                return None
+            elif not params.get(param):
+                value = eval(info.get('default'))
+                logger.debug('*****%s, type: %s', value, type(value))
+                params[param] = str(value)
+        logger.debug('Params checked and fixed:\n ==> %s', json.dumps(params))
+        return params
+                
+    def build_params(self, params_str):
+        """
+        create table t_unibot_status(id int(12) not null primary key auto_increment, instance_id int(12) not null, bot_id int(12) not null, 
+        bot_model_version int(12) not null, bot_status varchar(32) not null, cmd_time timestamp(6) not null default CURRENT_TIMESTAMP(6), 
+        exe_time timestamp(6) not null default CURRENT_TIMESTAMP(6) on update CURRENT_TIMESTAMP(6), description varchar(100)); 
+        
+        t_unibot_status
+        (id, )instance_id, bot_id, bot_model_version, bot_status, create_time, update_time, description
+        """
+        
+        params = self.check_and_fix_params(params_str)
+        if not params:
+            return None
+
+        sql = self.query.format(**params)
+        logger.info('Build sql: %s' % sql)
+        
+        return sql
+
+    def build_many(self, params_str_seq):
+        params_seq = []
+        for params_str in params_str_seq:
+            param = self.build_params(params_str)
+            if param is None:
+                continue 
+            params_seq.append(param)
+        return self.query, params_seq
 
 class Consumer(object):
     def __init__(self, conf):
         self.conf = conf
         self.init_kafka()
-        self.sqlbulider = SqlBuilder()
+        self.sqlbulider = SqlBuilder(cfg.query_params)
         self.db = DBHandler(conf.mysql_info)
 
         self.continue_run = True
@@ -219,8 +301,8 @@ class Consumer(object):
 
 
     def run(self, _id):
-        try:
-            while self.continue_run:
+        while self.continue_run:
+            try:
                 logger.debug('(%s)consumer waiting for msg', _id)
                 msgs = self.c.consume(num_messages=100, timeout=3.0)
                 logger.debug('(%s)consumer got %s msgs', _id, len(msgs))
@@ -235,18 +317,12 @@ class Consumer(object):
                             logger.exception('Kafka Error: %s', msg.error())
                         continue
                     value = msg.value()
-                    query = self.sqlbulider.build(value)
+                    query = self.sqlbulider.build_params(value)
                     if query is not None:
                         self.db.exe(query)
                         logger.debug('%s exe sql', _id)
-        except:
-            raise
-        finally:
-            self.close()
-
-    def consume_many():
-        pass
-
+            except Exception as e:
+                logger.exception('(%s)consumer Got Exception:', _id)
 
     def terminate(self):
         self.continue_run = False
@@ -281,7 +357,6 @@ class Consumer(object):
         except KeyboardInterrupt:
             sys.stderr.write('Aborted by user\n')
 
-        # Close down consumer to commit final offsets.
         self.c.close()
         
 
@@ -310,12 +385,25 @@ def test_logging():
     logger = logging.getLogger('dev')
     logger.info('Hello INFO!')
 
+def test_json():
+    data = {
+        "hello": "world",
+        "thing": datetime.now(),
+        "other": decimal.Decimal(0)
+    }
+
+    thing = json.dumps(data)
+    data = json.loads(thing)
+    return thing, data
+
+
 if __name__ == '__main__':
 
     cfg_path = 'consumer.yaml'
 
     cfg = ConfigHandler(cfg_path)
     c = Consumer(cfg)
+
     c.run(1)
 
     # run(cfg_path)
@@ -323,6 +411,7 @@ if __name__ == '__main__':
 
 '''
 todos:
-
--1 parse datetime use json
+-1 parse json_str to dict (datetime)
+-2 test mysql.connector executemany met
+-3 check_and_fix params by a better way
 '''

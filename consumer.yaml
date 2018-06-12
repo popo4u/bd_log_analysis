@@ -22,5 +22,25 @@ kafka_info:
   topics: 
     - bff6ca7fc15347e19fbbe65a92551947__test_by_ywq
 
-  partition_num: 2  
+  partition_num: 2
+
+query_params:
+    instance_id: 
+        required: True
+    bot_id:
+        required: True
+    bot_status:
+        required: True
+    create_time:
+        required: True
+    bot_code_version:
+        required: True
+    bot_model_version:
+        required: True
+    vm_ip:
+        default: None
+    description:
+        default: None
+    update_time:
+        default: datetime.now()
 ...
