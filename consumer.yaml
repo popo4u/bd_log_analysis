@@ -24,7 +24,7 @@ kafka_info:
 
   partition_num: 2
 
-query_params:
+query_params:   #default will pass to eval(), so be careful!
     instance_id: 
         required: True
     bot_id:
@@ -38,9 +38,10 @@ query_params:
     bot_model_version:
         required: True
     vm_ip:
-        default: None
+        default: no desc
     description:
-        default: None
+        default: no desc
     update_time:
         default: datetime.now()
+        default_type: code
 ...

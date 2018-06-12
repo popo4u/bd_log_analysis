@@ -7,6 +7,7 @@ import sys
 import yaml
 import copy
 import json
+import numbers
 import decimal
 import threading
 import collections
@@ -18,29 +19,14 @@ from datetime import datetime
 from functools import partial
 
 
-def setup_logging(cfg_path='logging.yaml', level=logging.INFO, env_key='LOG_CFG'):
+def setup_logging(cfg_path='logging.yaml', level=logging.INFO):
     """Setup the logging configuration"""
-    path = os.getenv(env_key) or cfg_path
-    if os.path.exists(path):
-        with open(path) as f:
+    if os.path.exists(cfg_path):
+        with open(cfg_path) as f:
             cfg = yaml.safe_load(f.read())
         logging.config.dictConfig(cfg)
     else:
         logging.basicConfig(level=level)
-
-setup_logging()
-logger = logging.getLogger('dev')
-
-
-class SpecJSONEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, datetime):
-            return dict(val=obj.isoformat(), _spec_type='datetime')
-        elif isinstance(obj, decimal.Decimal):
-            return dict(val=str(obj), _spec_type='decimal')
-        else:
-            return super(SpecJSONEncoder, self).default(obj)
-
 
 def object_hook(obj):
     CONVERTERS = {
@@ -56,9 +42,24 @@ def object_hook(obj):
     else:
         raise Exception('Json load Error: Unknown {}'.format(_spec_type))
 
+
+class SpecJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return dict(val=obj.isoformat(), _spec_type='datetime')
+        elif isinstance(obj, decimal.Decimal):
+            return dict(val=str(obj), _spec_type='decimal')
+        else:
+            return super(SpecJSONEncoder, self).default(obj)
+
+
 # parse datetime by json
-json.dumps = partial(json.dumps, cls=SpecJSONEncoder)
-json.loads = partial(json.loads, object_hook=object_hook)
+json_dumps = partial(json.dumps, cls=SpecJSONEncoder)
+json_loads = partial(json.loads, object_hook=object_hook)
+
+setup_logging()
+logger = logging.getLogger('dev')
+
 
 class ObjectDict(dict):
     def __inti__(self, *args, **kwargs):
@@ -151,11 +152,6 @@ class SqlBuilder(object):
     insert into table_name (col1, col2, col3) values (val1, val2, val3)
     '''
 
-    params = ('instance_id', 'bot_id', 'bot_model_version', 
-              'bot_code_version', 'bot_status', 'vm_ip', 'create_time', 'update_time', 'desc')
-
-    QueryParams = collections.namedtuple('QueryParams', params)
-
     query = ("insert into t_unibot_status "
              "(instance_id, bot_id, bot_model_version, bot_code_version, bot_status, vm_ip, create_time, update_time, description) values "
              "({instance_id}, {bot_id}, {bot_model_version}, {bot_code_version}, '{bot_status}', '{vm_ip}', '{create_time}', '{update_time}', '{description}')")
@@ -165,97 +161,33 @@ class SqlBuilder(object):
         self.params_info = params_info
         self.ime_format = '%Y-%m-%d %H:%M:%S.%f'
 
-    def build(self, params):
-        """
-        create table t_unibot_status(id int(12) not null primary key auto_increment, instance_id int(12) not null, bot_id int(12) not null, 
-        bot_model_version int(12) not null, bot_status varchar(32) not null, cmd_time timestamp(6) not null default CURRENT_TIMESTAMP(6), 
-        exe_time timestamp(6) not null default CURRENT_TIMESTAMP(6) on update CURRENT_TIMESTAMP(6), description varchar(100)); 
-        
-        t_unibot_status
-        (id, )instance_id, bot_id, bot_model_version, bot_status, create_time, update_time, description
-        """
-        
-        checked_ok, params = self.check_and_fix(params)
-        logger.debug('pass checked, %s', str(checked_ok))
-        if not checked_ok:
-            return None
+    def check_and_fix(self, params_str):
+        def is_empty(value):
+            if isinstance(value, type(None)):
+                return True
+            if isinstance(value, (str, unicode)):
+                return len(value.strip()) == 0
+            if isinstance(value, numbers.Number):
+                return False
+            return False
 
-        sql = self.query.format(**params)
-        logger.info('Build sql: %s' % sql)
-        
-        return sql
-
-    def dumps(self, _dict):
-        def _converter(o):
-            if isinstance(o, datetime):
-                return o.strftime(self.time_format)
-        return partial(json.dumps, default=_converter)(_dict)
-
-    def check_and_fix(self, params):
-        """
-        TODO: use a better way!
-        {"bot_status":"loading","instance_id":1137}
-        {"bot_id":2148,"bot_model_version":3,"bot_status":"running","instance_id":1137}
-        """
-        _params = json.dumps
-        # _params = self.QueryParams._make(params.split(','))._asdict()
-        self.ori_params = copy.deepcopy(_params)
-
-        logger.debug('Before checking and fixing params: \n==> %s', self.dumps(_params))
-
-        if not _params.get('instance_id'):
-            self.check_failed('instance_id')
-            return False, self.ori_params
-
-        if not _params.get('bot_status'):
-            self.check_failed('bot_status')
-            return False, self.ori_params
-
-        if not _params.get('bot_id'):
-            _params['bot_id'] = 0
-
-        if not _params.get('bot_model_version'):
-            _params['bot_model_version'] = 3
-
-        if not _params.get('bot_code_version'):
-            _params['bot_code_version'] = 3
-        
-        if not _params.get('create_time'):
-            _params['create_time'] = datetime.now().strftime(self.time_format)
-        else:
-            _params['create_time'] = datetime.strptime(_params['create_time'], self.time_format)
-
-        if not _params.get('update_time'):
-            _params['update_time'] = datetime.now().strftime(self.time_format)
-        else:
-            _params['update_time'] = datetime.strptime(_params['update_time'], self.time_format)
-
-        if not _params.get('vm_ip'):
-            _params['vm_ip'] = ''
-
-        if not _params.get('desc'):
-            _params['desc'] = 'no need desc!'
-
-        logger.debug('After fixing params: \n==> %s', self.dumps(_params))
-        return True, _params
-
-    def check_and_fix_params(self, params_str):
         logger.debug('Before checking and fixing params: \n==> %s', params_str)
 
-        params = json.loads(params_str)
+        params = json_loads(params_str)
         for param, info in self.params_info.items():
-            logger.debug('prams: %s, info: %s', param, info)
-            if not params.get(param) and info.get('required'):
+            if is_empty(params.get(param)) and info.get('required'):
                 logger.warn('Params illegal, %s is required!', param)
                 return None
-            elif not params.get(param):
-                value = eval(info.get('default'))
-                logger.debug('*****%s, type: %s', value, type(value))
-                params[param] = str(value)
-        logger.debug('Params checked and fixed:\n ==> %s', json.dumps(params))
+            elif is_empty(params.get(param)):
+                value = info.get('default')
+                if info.get('default_type') == 'code':
+                    value = eval(value)
+                params[param] = value
+        logger.debug('Params checked and fixed:\n ==> %s', json_dumps(params))
         return params
-                
-    def build_params(self, params_str):
+
+
+    def build(self, params_str):
         """
         create table t_unibot_status(id int(12) not null primary key auto_increment, instance_id int(12) not null, bot_id int(12) not null, 
         bot_model_version int(12) not null, bot_status varchar(32) not null, cmd_time timestamp(6) not null default CURRENT_TIMESTAMP(6), 
@@ -265,7 +197,7 @@ class SqlBuilder(object):
         (id, )instance_id, bot_id, bot_model_version, bot_status, create_time, update_time, description
         """
         
-        params = self.check_and_fix_params(params_str)
+        params = self.check_and_fix(params_str)
         if not params:
             return None
 
@@ -282,6 +214,7 @@ class SqlBuilder(object):
                 continue 
             params_seq.append(param)
         return self.query, params_seq
+
 
 class Consumer(object):
     def __init__(self, conf):
@@ -317,7 +250,7 @@ class Consumer(object):
                             logger.exception('Kafka Error: %s', msg.error())
                         continue
                     value = msg.value()
-                    query = self.sqlbulider.build_params(value)
+                    query = self.sqlbulider.build(value)
                     if query is not None:
                         self.db.exe(query)
                         logger.debug('%s exe sql', _id)
@@ -378,24 +311,6 @@ def run(cfg_path):
         logger.info('this will never happen!')
         map(lambda c: c.terminate(), consumers)
         raise
-
-
-def test_logging():
-    setup_logging()
-    logger = logging.getLogger('dev')
-    logger.info('Hello INFO!')
-
-def test_json():
-    data = {
-        "hello": "world",
-        "thing": datetime.now(),
-        "other": decimal.Decimal(0)
-    }
-
-    thing = json.dumps(data)
-    data = json.loads(thing)
-    return thing, data
-
 
 if __name__ == '__main__':
 

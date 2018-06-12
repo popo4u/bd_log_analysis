@@ -211,7 +211,6 @@ if __name__ == '__main__':
             'bot_model_version': 1,
             'vm_ip': '127.0.0.1',
             'desc': 'fake data',
-            'update_time': ''
         },
     ]
     str_test_cases = [
